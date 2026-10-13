@@ -20031,38 +20031,180 @@ def order_detail(order_id: int):
     if not order:
         conn.close()
         return redirect(url_for("orders"))
-    if str(order["order_type"] or "").strip().lower() == "vehicle sale":
+    sale_id_arg = request.args.get("sale_id")
+    is_vehicle_sale = str(order["order_type"] or "").strip().lower() == "vehicle sale"
+    if not is_vehicle_sale:
+        vso_chk = conn.execute(
+            "SELECT TOP 1 id FROM vehicle_sale_orders WHERE order_id = ? OR (? IS NOT NULL AND id = ?)",
+            (order_id, int(sale_id_arg) if sale_id_arg and sale_id_arg.isdigit() else None, int(sale_id_arg) if sale_id_arg and sale_id_arg.isdigit() else None),
+        ).fetchone()
+        if vso_chk:
+            is_vehicle_sale = True
+
+    if is_vehicle_sale:
+        sale_where = "vso.id = ?" if (sale_id_arg and sale_id_arg.isdigit()) else "vso.order_id = ?"
+        sale_arg = int(sale_id_arg) if (sale_id_arg and sale_id_arg.isdigit()) else order_id
         sale_row = conn.execute(
-    """
-    SELECT vso.*, v.photo_filename, v.vehicle_image_filenames, v.rc_book_filename,
-           v.insurance_document_filename, v.puc_certificate_filename, v.purchase_id_proof_filename,
-           v.sale_gst_enabled, v.sale_gst_mode, v.sale_gst_value,
-           v.purchase_mode, v.purchase_customer_name, v.purchase_customer_address,
-           v.purchase_customer_phone, v.purchase_customer_id, v.purchase_id_proof_ref,
-           v.purchase_reference
-    FROM vehicle_sale_orders vso
-    LEFT JOIN vehicles v ON v.id = vso.vehicle_id
-    WHERE vso.order_id = ?
-    """,
-    (order_id,),
-).fetchone()
+            f"""
+            SELECT vso.*,
+                   v.photo_filename,
+                   v.vehicle_image_filenames AS v_vehicle_image_filenames,
+                   v.rc_book_filename AS v_rc_book_filename,
+                   v.rc_book_back_filename AS v_rc_book_back_filename,
+                   v.insurance_document_filename AS v_insurance_document_filename,
+                   v.puc_certificate_filename AS v_puc_certificate_filename,
+                   v.purchase_id_proof_filename AS v_purchase_id_proof_filename,
+                   v.sale_gst_enabled, v.sale_gst_mode, v.sale_gst_value,
+                   v.purchase_mode AS v_purchase_mode,
+                   v.purchase_customer_name AS v_purchase_customer_name,
+                   v.purchase_customer_address AS v_purchase_customer_address,
+                   v.purchase_customer_phone AS v_purchase_customer_phone,
+                   v.purchase_customer_id AS v_purchase_customer_id,
+                   v.purchase_id_proof_ref AS v_purchase_id_proof_ref,
+                   v.purchase_reference AS v_purchase_reference,
+                   v.model_year AS v_model_year,
+                   v.registration_no AS v_registration_no,
+                   v.chassis_no AS v_chassis_no,
+                   v.owners AS v_owners,
+                   v.current_fc AS v_current_fc,
+                   v.purchase_price AS v_purchase_price,
+                   v.kms_driven AS v_kms_driven,
+                   v.insurance AS v_insurance,
+                   v.insurance_end_date AS v_insurance_end_date,
+                   v.rc_book_end_date AS v_rc_book_end_date,
+                   v.puc_number AS v_puc_number,
+                   v.puc_valid_upto AS v_puc_valid_upto,
+                   v.fine_details AS v_fine_details,
+                   v.fine_amount AS v_fine_amount,
+                   v.remarks AS v_remarks,
+                   v.hypothecation AS v_hypothecation
+            FROM vehicle_sale_orders vso
+            LEFT JOIN vehicles v ON v.id = vso.vehicle_id
+            WHERE {sale_where}
+            ORDER BY vso.id DESC
+            """,
+            (sale_arg,),
+        ).fetchone()
+
         repairs = []
+        services = []
         if sale_row and sale_row["vehicle_id"]:
             repairs = conn.execute(
                 """
-                SELECT repair_date, description, cost, payment_mode, created_at
+                SELECT repair_date, description, cost, total_cost, payment_mode, created_at
                 FROM vehicle_repairs
                 WHERE vehicle_id = ?
                 ORDER BY COALESCE(repair_date, CAST(created_at AS DATE)) DESC, created_at DESC
                 """,
                 (sale_row["vehicle_id"],),
             ).fetchall()
+            services = conn.execute(
+                """
+                SELECT service_date, service_done_by, amount, remarks, created_at
+                FROM vehicle_services
+                WHERE vehicle_id = ?
+                ORDER BY COALESCE(service_date, CAST(created_at AS DATE)) DESC, created_at DESC
+                """,
+                (sale_row["vehicle_id"],),
+            ).fetchall()
         conn.close()
+
+        sale_payload = None
+        if sale_row:
+            s_dict = dict(sale_row)
+            # Normalize seller details from vehicle if missing in vso
+            s_dict["purchase_mode"] = s_dict.get("purchase_mode") or s_dict.get("v_purchase_mode") or "Direct"
+            s_dict["purchase_customer_name"] = s_dict.get("purchase_customer_name") or s_dict.get("v_purchase_customer_name") or ""
+            s_dict["purchase_customer_phone"] = s_dict.get("purchase_customer_phone") or s_dict.get("v_purchase_customer_phone") or ""
+            s_dict["purchase_customer_id"] = s_dict.get("purchase_customer_id") or s_dict.get("v_purchase_customer_id") or ""
+            s_dict["purchase_customer_address"] = s_dict.get("purchase_customer_address") or s_dict.get("v_purchase_customer_address") or ""
+            s_dict["purchase_reference"] = s_dict.get("purchase_reference") or s_dict.get("v_purchase_reference") or ""
+            s_dict["purchase_id_proof_ref"] = s_dict.get("purchase_id_proof_ref") or s_dict.get("v_purchase_id_proof_ref") or ""
+            s_dict["purchase_id_proof_filename"] = s_dict.get("purchase_id_proof_filename") or s_dict.get("v_purchase_id_proof_filename") or ""
+            s_dict["seller_id_proof_filename"] = s_dict["purchase_id_proof_filename"]
+
+            # Normalize vehicle document filenames
+            s_dict["rc_book_filename"] = s_dict.get("rc_book_filename") or s_dict.get("v_rc_book_filename") or ""
+            s_dict["rc_book_back_filename"] = s_dict.get("rc_book_back_filename") or s_dict.get("v_rc_book_back_filename") or ""
+            s_dict["insurance_document_filename"] = s_dict.get("insurance_document_filename") or s_dict.get("v_insurance_document_filename") or ""
+            s_dict["puc_certificate_filename"] = s_dict.get("puc_certificate_filename") or s_dict.get("v_puc_certificate_filename") or ""
+
+            # Normalize vehicle images
+            s_dict["vehicle_image_filenames"] = s_dict.get("vehicle_image_filenames") or s_dict.get("v_vehicle_image_filenames") or ""
+
+            # Normalize vehicle attributes
+            s_dict["model_year"] = s_dict.get("model_year") or s_dict.get("v_model_year") or ""
+            s_dict["registration_no"] = s_dict.get("registration_no") or s_dict.get("v_registration_no") or s_dict.get("v_chassis_no") or ""
+            s_dict["owners"] = s_dict.get("owners") or s_dict.get("v_owners") or ""
+            s_dict["current_fc"] = s_dict.get("current_fc") or s_dict.get("v_current_fc") or ""
+            s_dict["kms_driven"] = s_dict.get("kms_driven") or s_dict.get("v_kms_driven") or ""
+            s_dict["insurance_end_date"] = s_dict.get("insurance_end_date") or s_dict.get("v_insurance_end_date") or ""
+            s_dict["puc_valid_upto"] = s_dict.get("puc_valid_upto") or s_dict.get("v_puc_valid_upto") or ""
+            s_dict["fine_details"] = s_dict.get("fine_details") or s_dict.get("v_fine_details") or ""
+            s_dict["fine_amount"] = s_dict.get("fine_amount") or s_dict.get("v_fine_amount") or ""
+            s_dict["remarks"] = s_dict.get("remarks") or s_dict.get("v_remarks") or ""
+            s_dict["hypothecation"] = s_dict.get("hypothecation") or s_dict.get("v_hypothecation") or ""
+            s_dict["purchase_price"] = float(s_dict.get("purchase_price") or s_dict.get("v_purchase_price") or 0)
+            s_dict["repair_cost"] = float(s_dict.get("repair_cost") or 0)
+            s_dict["purchase_total_cost"] = float(s_dict.get("purchase_total_cost") or (s_dict["purchase_price"] + s_dict["repair_cost"]))
+            s_dict["subtotal_amount"] = float(s_dict.get("subtotal_amount") or s_dict.get("selling_price") or 0)
+            s_dict["discount_amount"] = float(s_dict.get("discount_amount") or 0)
+            disc_pct = float(s_dict.get("discount_percent") or 0)
+            if disc_pct <= 0 and s_dict["subtotal_amount"] > 0 and s_dict["discount_amount"] > 0:
+                disc_pct = round((s_dict["discount_amount"] * 100.0) / s_dict["subtotal_amount"], 2)
+            s_dict["discount_percent"] = disc_pct
+            s_dict["gst_percent"] = float(s_dict.get("gst_percent") or 0)
+            s_dict["gst_amount"] = float(s_dict.get("gst_amount") or 0)
+            s_dict["payment_finance_name"] = s_dict.get("payment_finance_name") or ""
+            s_dict["payment_commission_amount"] = float(s_dict.get("payment_commission_amount") or s_dict.get("commission_amount") or 0)
+
+            # Compute payment status and balance amount
+            tot_amt = float(s_dict.get("total_amount") or order["total_amount"] or 0)
+            adv_amt = float(s_dict.get("advance_amount") or order["advance_amount"] or 0)
+            bal_amt = max(0.0, tot_amt - adv_amt)
+            s_dict["balance_amount"] = bal_amt
+
+            if tot_amt <= 0:
+                s_dict["payment_status"] = "Paid"
+            elif adv_amt >= tot_amt:
+                s_dict["payment_status"] = "Paid"
+            elif adv_amt > 0:
+                s_dict["payment_status"] = "Partial"
+            else:
+                s_dict["payment_status"] = "Unpaid"
+
+            sale_payload = build_gallery_vehicle_payload(s_dict)
+            sale_payload["balance_amount"] = bal_amt
+            sale_payload["payment_status"] = s_dict["payment_status"]
+            sale_payload["purchase_price"] = s_dict["purchase_price"]
+            sale_payload["repair_cost"] = s_dict["repair_cost"]
+            sale_payload["purchase_total_cost"] = s_dict["purchase_total_cost"]
+            sale_payload["subtotal_amount"] = s_dict["subtotal_amount"]
+            sale_payload["discount_amount"] = s_dict["discount_amount"]
+            sale_payload["discount_percent"] = s_dict["discount_percent"]
+            sale_payload["gst_percent"] = s_dict["gst_percent"]
+            sale_payload["gst_amount"] = s_dict["gst_amount"]
+            sale_payload["payment_finance_name"] = s_dict["payment_finance_name"]
+            sale_payload["payment_commission_amount"] = s_dict["payment_commission_amount"]
+            sale_payload["customer_id_proof_ref"] = s_dict.get("customer_id_proof_ref")
+            sale_payload["purchase_reference"] = s_dict["purchase_reference"]
+            sale_payload["purchase_id_proof_ref"] = s_dict["purchase_id_proof_ref"]
+            sale_payload["rc_book_back_filename"] = s_dict["rc_book_back_filename"]
+            sale_payload["seller_id_proof_filename"] = s_dict["seller_id_proof_filename"]
+            sale_payload["kms_driven"] = s_dict["kms_driven"]
+            sale_payload["insurance_end_date"] = s_dict["insurance_end_date"]
+            sale_payload["puc_valid_upto"] = s_dict["puc_valid_upto"]
+            sale_payload["fine_details"] = s_dict["fine_details"]
+            sale_payload["fine_amount"] = s_dict["fine_amount"]
+            sale_payload["remarks"] = s_dict["remarks"]
+            sale_payload["hypothecation"] = s_dict["hypothecation"]
+
         return render_template(
             "vehicle_sale_detail_gallery.html",
             order=order,
-            sale=(build_gallery_vehicle_payload(dict(sale_row)) if sale_row else None),
+            sale=sale_payload,
             repairs=repairs,
+            services=services,
         )
     if order and request.method == "GET":
         customer_id = order["customer_id"]
